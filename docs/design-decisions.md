@@ -5,7 +5,7 @@ the sprint brief. Each entry answers a question the brief asks the pair to
 settle, and records *why* rather than just *what*, so a reviewer can challenge
 the reasoning instead of guessing at it.
 
-## 1. Where is the ticket collection stored, and how is it passed between functions?
+## 1. Where is the ticket collection stored, and how is it passed between the functions?
 
 **Decision:** a plain `list` of ticket dictionaries, passed explicitly as the
 first argument to every function. No global state, no class wrapper.
