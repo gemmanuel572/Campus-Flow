@@ -1,0 +1,698 @@
+================================================================================
+CAMPUSFLOW - COMPLETE EXPLANATION
+A plain-text walkthrough of the project: what it is, what every file does,
+and how the whole thing works.
+================================================================================
+
+This file is written for you to revise from and to speak from during the
+technical defence. It explains the reasoning, not just the file list. If you
+can read this and then explain each section in your own words, you are ready.
+
+
+--------------------------------------------------------------------------------
+PART 1 - WHAT THE PROJECT IS
+--------------------------------------------------------------------------------
+
+CampusFlow is a command-line helpdesk for campus technical support.
+
+The real-world problem (from the sprint brief):
+
+  Learn2Earn campus staff report technical problems - Wi-Fi outages, faulty
+  laptops, broken development environments, platforms they cannot get into.
+  Those reports arrive informally, by chat or in person, and they get lost.
+
+CampusFlow turns each report into a record with a stable identity, works out
+how urgent it is, lets a dispatcher assign it to a person, tracks it through
+to completion, and writes it to disk so closing the program loses nothing.
+
+It is a Python program using ONLY the standard library. No framework, no
+database, no web server, no AI model at runtime. That constraint is deliberate
+in the brief, and it is why the whole project is around 400 lines of readable
+Python that you can defend line by line.
+
+
+--------------------------------------------------------------------------------
+PART 2 - THE DATA MODEL
+--------------------------------------------------------------------------------
+
+A "ticket" is a Python dictionary with exactly eight fields:
+
+  {
+    "id":             "T001",
+    "title":          "Campus Wi-Fi is down",
+    "category":       "Network",
+    "urgency":        "high",
+    "affected_users": 15,
+    "priority":       "critical",
+    "status":         "open",
+    "assigned_to":    None
+  }
+
+Field by field:
+
+  id              Unique, auto-generated. T001, T002, T003... The program
+                  never asks the user for this and never reuses one.
+
+  title           What is wrong. Free text, but it must not be blank.
+
+  category        One of exactly four values: Network, Hardware, Software,
+                  Other. Anything else is rejected.
+
+  urgency         One of exactly three: low, medium, high.
+
+  affected_users  How many people are affected. A positive whole number.
+                  Zero, negative, decimal and text are all rejected.
+
+  priority        COMPUTED, never typed by the user. Derived from urgency and
+                  affected_users by the four rules in Part 3. One of:
+                  low, medium, high, critical.
+
+  status          Where the ticket is in its life: open, in_progress, or
+                  resolved. Starts as "open". Movement is restricted - see
+                  Part 5.
+
+  assigned_to     The staff member's name, or None if nobody owns it yet.
+
+The whole collection is a plain Python LIST of these dictionaries:
+
+  ticket_list = [ {...T001...}, {...T002...}, {...T003...} ]
+
+That list is created once in main.py and passed explicitly into every function
+that needs it. There is no global variable holding it, and no class wrapping
+it. This is a deliberate decision - see Part 7.
+
+
+--------------------------------------------------------------------------------
+PART 3 - THE PRIORITY ENGINE (the heart of feature F1)
+--------------------------------------------------------------------------------
+
+This is the most important logic in the project, and it is exactly the kind of
+thing a grader will probe in the defence. It is ORDINARY PYTHON, not AI.
+
+The brief specifies four rules. They are checked IN ORDER, and the FIRST MATCH
+WINS - meaning the function returns as soon as one rule matches and never
+looks at the later rules.
+
+  RULE 1   high urgency AND 10 or more affected users  ->  critical
+  RULE 2   high urgency OR  10 or more affected users  ->  high
+  RULE 3   medium urgency OR 3 or more affected users  ->  medium
+  RULE 4   anything else valid                         ->  low
+
+In code (campusflow/tickets.py, calculate_priority):
+
+  if urgency == "high" and affected >= 10:
+      return "critical"
+  if urgency == "high" or affected >= 10:
+      return "high"
+  if urgency == "medium" or affected >= 3:
+      return "medium"
+  return "low"
+
+--- WHY THE ORDER MATTERS ------------------------------------------------
+
+This is the single best thing to be able to explain, because it is a real
+trap. Consider: urgency "high", affected_users 12.
+
+  Rule 1: high AND 12 >= 10   -> matches -> CRITICAL. Stop here.
+
+But notice that 12 users also satisfies rule 2 (12 >= 10) and rule 3
+(12 >= 3), and "high" satisfies rule 2 on urgency alone. So this one ticket
+matches rules 1, 2 AND 3. If you reordered the branches - say you put rule 3
+first - the same ticket would come back "medium", which is badly wrong.
+
+First-match-wins is what makes the order meaningful. The rules are written as
+a cascade from most severe to least, and returning early is what stops a
+severe ticket falling through to a milder rule.
+
+--- WHY RULE 2 TESTS URGENCY *OR* USERS ----------------------------------
+
+Rule 2's "or" is doing real work in two different directions:
+
+  - It catches high-urgency tickets with few users (high + 2 -> high)
+  - It ALSO catches low-urgency tickets with many users (low + 12 -> high)
+
+That second case is easy to get wrong. If you wrote rule 2 as
+`if urgency == "high"` and forgot the `or affected >= 10`, then a low-urgency
+ticket affecting 300 people would sink to the bottom of the queue. There is a
+test for exactly this (test_low_urgency_with_ten_users_is_high) so that a
+future edit cannot quietly break it.
+
+--- THE FOUR ACCEPTANCE EXAMPLES FROM THE BRIEF --------------------------
+
+  high + 12  -> critical    (rule 1)
+  high + 2   -> high        (rule 2, via urgency)
+  low  + 4   -> medium      (rule 3, via users)
+  low  + 1   -> low         (rule 4, the fall-through)
+
+All four are pinned by tests in tests/test_tickets.py.
+
+
+--------------------------------------------------------------------------------
+PART 4 - INPUT VALIDATION
+--------------------------------------------------------------------------------
+
+Every value the user types is checked before it is stored. This lives in
+campusflow/tickets.py as small functions, one per field:
+
+  normalize_category(value)      " network "  -> "Network";  "Printing" -> error
+  normalize_urgency(value)       "HIGH"       -> "high";     "urgent"   -> error
+  validate_title(value)          "  Wi-Fi  "  -> "Wi-Fi";    "   "      -> error
+  validate_affected_users(value) " 15 "       -> 15;         0          -> error
+
+--- WHAT "NORMALIZE" MEANS HERE ------------------------------------------
+
+Normalizing means accepting a reasonable human variation and converting it to
+one canonical spelling before storing it. So " network ", "Network" and
+"NETWORK" all become exactly "Network" in the ticket. The user is not punished
+for capitalisation or a stray space.
+
+This matters for more than friendliness. If we stored whatever was typed, then
+"Network" and "network" would be two different categories in the data, and any
+later report grouping by category would silently split one category into two.
+
+--- THE affected_users FUNCTION IS THE INTERESTING ONE -------------------
+
+validate_affected_users has to reject: zero, negative numbers, decimals, and
+text. But it has to ACCEPT the digits as typed by the user, because the CLI
+always hands over a string - input() never returns anything else.
+
+Two traps are handled explicitly, and both are worth knowing:
+
+TRAP 1 - bool is a subclass of int.
+
+  In Python, True IS an integer. Run this and see:
+
+      python3 -c "print(isinstance(True, int))"     -> True
+      python3 -c "print(int(True))"                 -> 1
+
+  So a naive `if isinstance(value, int)` check would let `affected_users=True`
+  through, and it would be stored as... 1 user. A truthy value silently
+  becoming a headcount is a real bug class. The guard at the top of the
+  function rejects bool first, before the int check can see it. There is a
+  test pinning this: test_bool_is_rejected.
+
+TRAP 2 - floats.
+
+  Should 12.0 be accepted as 12? We decided NO - reject it. A float in this
+  field means something upstream is confused, and silently truncating 2.9 to
+  2 hides that confusion. The brief lists "a decimal" among the values to
+  reject, so rejecting is also the reading that follows the spec most
+  literally.
+
+--- ALL-OR-NOTHING CREATION -------------------------------------------------
+
+create_ticket validates EVERY field before it appends anything to the list.
+That ordering is deliberate: if validation happened field-by-field as the
+ticket was built, a failure on the last field would leave a half-written
+record in the collection. Two tests pin this behaviour - one checks the list
+is still empty after a rejection, the other checks the rejected attempt did
+not consume ticket id T001.
+
+
+--------------------------------------------------------------------------------
+PART 5 - THE STATUS LIFE CYCLE (feature F4)
+--------------------------------------------------------------------------------
+
+A ticket moves through three states:
+
+      open ──► in_progress ──► resolved
+        ▲                          │
+        └──────── reopen ──────────┘
+
+Only THREE moves are legal, and they are listed explicitly in
+campusflow/workflow.py as ALLOWED_TRANSITIONS:
+
+  open        -> in_progress    (and ONLY if the ticket has an assignee)
+  in_progress -> resolved
+  resolved    -> open           (the "explicit reopen")
+
+Everything else is rejected with InvalidTransitionError.
+
+--- THE RULES WORTH EXPLAINING ---------------------------------------------
+
+1. AN UNASSIGNED TICKET CANNOT BE STARTED.
+   Moving open -> in_progress on a ticket with assigned_to = None is refused.
+   The reasoning: "in progress" means somebody is working on it. If nobody
+   owns the ticket, that statement is false, and you would have work marked as
+   underway that no one is actually doing. This is a separate check from the
+   transition table, because the transition itself is legal - it is the
+   ticket's data that disqualifies it.
+
+2. YOU CANNOT SKIP A STEP.
+   open -> resolved is rejected. The brief defines the flow as
+   open -> in_progress -> resolved, so a ticket must pass through the middle
+   state. Allowing the skip would make "resolved" mean two different things -
+   "someone worked this" and "someone waved it through" - and the history
+   would be lost.
+
+3. A RESOLVED TICKET IS FROZEN UNTIL REOPENED.
+   resolved -> in_progress is rejected. To work on a resolved ticket again you
+   must first reopen it (resolved -> open) and then start it. The brief says a
+   resolved ticket "may only be modified after an explicit reopen", so this is
+   enforced as a required extra step rather than a convenience.
+
+   Note the consequence: this rule is read as covering ASSIGNMENT too. So
+   reassigning a resolved ticket also raises. Changing who owns a ticket is a
+   modification, and the brief says modifications wait for a reopen. This is
+   the stricter of two possible readings, and it is flagged in
+   docs/design-decisions.md for your partner to confirm.
+
+4. SETTING THE CURRENT STATUS IS REJECTED.
+   open -> open is an error, not a silent no-op. A no-op would look like the
+   command succeeded while nothing happened, which is confusing during a demo.
+
+
+--------------------------------------------------------------------------------
+PART 6 - THE WORK QUEUE AND REPORTS (features F5 and F6)
+--------------------------------------------------------------------------------
+
+--- THE WORK QUEUE ---------------------------------------------------------
+
+get_work_queue answers: "what should I pick up next?"
+
+It filters to tickets that are still open, then sorts them so the most urgent
+come first:
+
+  primary sort   : priority, critical -> high -> medium -> low
+  tie-break      : the EARLIER NUMERIC ticket id
+
+The priority ranking is a small dictionary in tickets.py:
+
+  PRIORITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+Lower number = more urgent = sorts first. Python's sorted() is stable, but we
+do not rely on that for the tie-break; the key is an explicit tuple
+(rank, ticket_number) so ties are decided by the number, not by the order the
+items happened to be in the list.
+
+--- THE TIE-BREAK DETAIL IS A GENUINE TRAP --------------------------------
+
+The tie-break says "earlier NUMERIC ticket id" - and numeric is the operative
+word. Ticket ids are strings, and strings do not sort the way numbers do:
+
+  python3 -c "print(sorted(['T010', 'T002', 'T001']))"
+
+  ->  ['T001', 'T002', 'T010']      (lucky here)
+
+  python3 -c "print(sorted(['T010', 'T002']))"
+
+  ->  ['T002', 'T010']              (still fine)
+
+Wait - those look right. The trap shows up differently:
+
+  python3 -c "print(sorted(['T9', 'T10']))"
+
+  ->  ['T10', 'T9']
+
+Because "T10" < "T9" compares character by character: '1' comes before '9'.
+So as text, ticket T10 sorts BEFORE ticket T9 - the wrong order.
+
+CampusFlow avoids this by parsing the number out of the id and sorting on an
+integer:
+
+  id_number("T010") -> 10
+  id_number("T009") -> 9
+
+and the queue's sort key uses that integer. There is a test pinning exactly
+this: test_tie_break_uses_numeric_not_lexical_order, which builds tickets
+T010 and T002 and asserts T002 comes first.
+
+(Our ids are zero-padded to three digits, so text sorting would happen to work
+today. We still parse the number, because relying on the padding width is a
+silent dependency that breaks the moment ids pass T999.)
+
+--- AN ID THAT DOES NOT MATCH ----------------------------------------------
+
+If a ticket id does not look like T<digits> - say someone hand-edited the JSON
+file - id_number returns None. Rather than crashing the whole queue, that
+ticket is parked at the end of its priority band. The program degrades instead
+of dying.
+
+--- REPORTS ----------------------------------------------------------------
+
+build_report counts tickets three ways:
+
+  total        : how many tickets exist
+  by_status    : how many open / in_progress / resolved
+  by_priority  : how many low / medium / high / critical
+
+The important design point: EVERY status and priority key is present in the
+result even when its count is zero. Two reasons:
+
+  1. An empty ticket list produces a complete, printable report showing zeros,
+     instead of a blank screen. The brief explicitly requires handling zero
+     tickets correctly.
+  2. The printed report always has the same shape, so you can compare two
+     runs at a glance without wondering whether a missing line means zero or
+     means "not counted".
+
+
+--------------------------------------------------------------------------------
+PART 7 - PERSISTENCE (feature F7)
+--------------------------------------------------------------------------------
+
+campusflow/storage.py is the ONLY file in the project that imports json or
+touches the filesystem. Two functions:
+
+  load_tickets(path)  -> list of ticket dicts
+  save_tickets(tickets, path)
+
+--- LOADING: THREE DISTINCT OUTCOMES ---------------------------------------
+
+  1. File does not exist       -> return []          (normal first run)
+  2. File exists and parses    -> return contents
+  3. File exists but is broken -> raise StorageError
+
+Case 3 is the one worth defending. The tempting shortcut is to catch the parse
+error and return [] so the program always starts. That is dangerous. Consider
+the sequence:
+
+  - The user has 40 real tickets in the file.
+  - Something corrupts the file - a bad editor save, a full disk, a merge
+    accident.
+  - The program starts, catches the error, starts with [].
+  - The user adds one ticket, or just exits the menu.
+  - Save writes a file containing ONE ticket. The other 39 are gone.
+
+So a corrupt file RAISES instead. main.py catches that and refuses to start,
+printing the parse error. The user is told exactly what is wrong and where,
+and the file is left untouched so it can be repaired. Refusing to start is a
+deliberate trade: the program is briefly useless, but no data is destroyed.
+
+There is also a check that the parsed JSON is actually a LIST. A file
+containing a single object or a bare number is structurally wrong for our
+format and is rejected the same way.
+
+--- SAVING: THE ATOMIC WRITE ----------------------------------------------
+
+save_tickets does not write straight over tickets.json. It:
+
+  1. Creates the parent directory if missing (so a first run works).
+  2. Creates a TEMPORARY file in the SAME directory.
+  3. Writes the JSON into the temporary file.
+  4. os.replace(tmp, tickets.json) - an atomic rename.
+
+Why bother? Because a crash, a Ctrl-C, or a full disk partway through a direct
+overwrite leaves a truncated, half-written JSON file - which the next load
+will reject, and the user's tickets are now unreadable. With the rename, either
+the whole new file is in place or the old one still is. There is no middle
+state.
+
+The temporary file is created in the same directory rather than /tmp because
+os.replace is only guaranteed atomic within a single filesystem.
+
+If anything goes wrong mid-write, the temporary file is deleted on the way
+out, so failed saves do not litter the directory. There is a test for that.
+
+--- IDS AFTER A RELOAD ------------------------------------------------------
+
+This is a subtle requirement and a good one to explain. Suppose the file holds
+T001 to T007 and the program restarts. If id generation used a counter
+starting at 1, the next ticket would be T001 again - a duplicate, silently
+overwriting the meaning of the existing T001.
+
+CampusFlow avoids this by deriving the next id from the tickets actually
+present:
+
+  next_ticket_id()  scans every existing id, finds the highest number, and
+                    returns highest + 1.
+
+So a reloaded file containing T007 yields T008. No memory of the previous run
+is needed, which means the rule holds no matter how the file got into its
+current state. Two tests cover this, including a save/reload/create sequence.
+
+
+--------------------------------------------------------------------------------
+PART 8 - THE CLI (main.py)
+--------------------------------------------------------------------------------
+
+main.py is the ONLY file that talks to a human. It calls input() and print(),
+and it contains NO business rules at all.
+
+That separation is the structural decision that makes everything else
+testable. Because create_ticket, calculate_priority, change_status and the
+rest never call input(), a test can call them directly with real data and
+assert on the result. No stdin, no mocking, no fake terminal. If the rules
+lived in main.py mixed with prompts, testing them would require simulating a
+user.
+
+The flow:
+
+  1. main() loads tickets at startup.
+     If the file is corrupt, it prints the error and exits with code 1 -
+     it does NOT continue with an empty list (see Part 7).
+
+  2. run() prints the menu in a loop until the user picks 9.
+
+  3. Each menu option maps to a small action function that:
+       - gathers input
+       - calls into campusflow/
+       - prints the result
+     Every action is wrapped in try/except CampusFlowError. Anything the
+     business logic rejects prints "Error: <message>" and the menu continues.
+     A bad input never crashes the program out from under the user.
+
+  4. On exit, tickets are saved. If the save fails, that is reported and the
+     exit code is 1 rather than pretending success.
+
+Note the two different failure styles, which are worth distinguishing in the
+defence:
+
+  - A bad VALUE (users=0, bad status) -> caught, printed, menu continues.
+    This is normal operation. The user made a typo.
+  - A broken FILE at startup -> the program refuses to run at all. This is
+    not something the user can fix by choosing a different menu option, and
+    continuing would risk overwriting their data.
+
+Ctrl-C and Ctrl-D are handled at the menu prompt and treated as "exit", so
+tickets are still saved rather than lost to an interrupt.
+
+
+--------------------------------------------------------------------------------
+PART 9 - THE TEST SUITE
+--------------------------------------------------------------------------------
+
+Run it from the repository root:
+
+  python3 -m unittest discover -s tests -v
+
+56 tests, all passing, in about 0.02 seconds.
+
+  tests/test_tickets.py    28 tests   validation and the priority engine (F1)
+  tests/test_workflow.py   20 tests   assignment, lifecycle, queue (F3-F5)
+  tests/test_storage.py     8 tests   persistence (F7)
+
+--- WHY THAT COMMAND WORKS -------------------------------------------------
+
+  python3 -m          runs unittest as a module, which puts the current
+                      directory (the repo root) on sys.path, so
+                      "import campusflow" resolves.
+  unittest discover   finds test files automatically - no hand-maintained list
+                      to fall out of date.
+  -s tests            start looking in tests/.
+  -v                  verbose: prints each test name and ok/FAIL.
+
+So: run it from the repository root. Running it from inside tests/ will fail
+to import campusflow.
+
+--- WHAT THE TESTS ACTUALLY CHECK ------------------------------------------
+
+Every test has a specific expectation and an assertion - the brief asks for
+"meaningful" tests, not a count. The important ones:
+
+  Priority boundaries, including both acceptance examples AND the
+  less-obvious cases:
+    high + 12 -> critical        (rule 1)
+    high + 10 -> critical        (the exact boundary - "10 or more")
+    high + 2  -> high            (rule 2 via urgency)
+    low  + 10 -> high            (rule 2 via users - the easy one to break)
+    low  + 4  -> medium          (rule 3)
+    low  + 1  -> low             (rule 4)
+
+  Invalid input, not just happy paths:
+    affected_users of 0, -3, 2.5, "2.5", "many", True
+    blank and empty titles
+    invalid urgency and invalid category
+
+  Failure leaves the data intact - this is the pattern worth pointing out.
+  Several tests assert the exception AND THEN assert the ticket was not
+  changed:
+
+      with self.assertRaises(InvalidTransitionError):
+          workflow.change_status(ticket_list, "T001", "in_progress")
+      self.assertEqual(ticket_list[0]["status"], "open")
+
+  Checking that a function raised is not the same as checking it did no harm.
+  A buggy implementation could raise after already mutating the record. The
+  second assertion is what catches that.
+
+  The queue tie-break uses numeric, not text, ordering (T002 before T010).
+
+  Storage: round-trip, missing file, corrupt file raising WITHOUT destroying
+  the file, and ids staying unique across a reload.
+
+Note the storage tests all use tempfile.TemporaryDirectory() and clean up
+after themselves. The suite never touches a real data/tickets.json, so running
+the tests cannot damage your actual tickets.
+
+--- HOW TO TALK ABOUT THE TESTS IN THE DEFENCE -----------------------------
+
+Do not say "the tests pass". Pick one test and explain what it would catch.
+The best choice is test_low_urgency_with_ten_users_is_high: it checks rule 2's
+`or affected >= 10` branch, which is the clause most likely to be dropped in a
+rewrite, and if it were dropped a ticket affecting 300 people would silently
+sink to the bottom of the queue.
+
+
+--------------------------------------------------------------------------------
+PART 10 - FILE BY FILE SUMMARY
+--------------------------------------------------------------------------------
+
+  main.py
+    The CLI. Menu loop, input(), print(), and error display. No business rules.
+    Also handles startup failure (corrupt file) and saving on exit.
+
+  campusflow/__init__.py
+    Marks the directory as a package. Holds the version string.
+
+  campusflow/errors.py
+    The exception hierarchy: CampusFlowError, and under it ValidationError,
+    TicketNotFoundError, InvalidTransitionError, StorageError. Small file,
+    but it is what lets the logic layer signal problems without printing.
+
+  campusflow/tickets.py           [Engineer A - F1]
+    Ticket creation and the priority engine.
+    CATEGORIES, URGENCIES, PRIORITIES, STATUSES, PRIORITY_ORDER
+    normalize_category, normalize_urgency, validate_title,
+    validate_affected_users
+    calculate_priority  <- the four rules
+    id_number, next_ticket_id, create_ticket
+
+  campusflow/workflow.py          [Engineer B - F3, F4, F5]
+    Assignment, status transitions, work queue.
+    ALLOWED_TRANSITIONS  <- the three legal moves
+    find_ticket, assign_ticket, change_status, get_work_queue
+
+  campusflow/reports.py           [Engineer B - F6]
+    build_report (totals + breakdowns), format_report (text rendering).
+
+  campusflow/storage.py           [both - F7]
+    load_tickets, save_tickets. The only module touching json or the
+    filesystem. Atomic writes, corrupt-file refusal.
+
+  tests/test_tickets.py           [Engineer A]
+  tests/test_workflow.py          [Engineer B]
+  tests/test_storage.py           [both]
+
+  docs/design-decisions.md
+    The interfaces agreed before coding, plus three flagged judgement calls
+    where the brief is ambiguous.
+
+  docs/ai-learning-log.md
+    The AI learning log. A template - you fill in the observations.
+
+  README.md
+    Problem statement, setup, run and test instructions, how priority and
+    status work, known limitations.
+
+  .gitignore
+    Ignores .venv/, __pycache__/, *.pyc, .env, and data/ - so runtime tickets
+    are never committed and two teammates' ticket files never collide.
+
+  EXPLANATION.txt
+    This file.
+
+
+--------------------------------------------------------------------------------
+PART 11 - THE THREE JUDGEMENT CALLS
+--------------------------------------------------------------------------------
+
+The brief is ambiguous in three places. Each was decided, implemented, tested,
+and written down in docs/design-decisions.md with the alternative reading. Be
+ready to explain these - "we decided X, the alternative was Y, here is why" is
+exactly what the technical defence marks are looking for, and it is much
+stronger than pretending no ambiguity existed.
+
+  1. WHAT "open, unresolved tickets" MEANS FOR THE QUEUE
+     Chosen: status == "open" only, so an in_progress ticket has left the
+     queue. Reasoning: the brief names its own acceptance test "Open-ticket
+     queue". Alternative: status != "resolved". One-line change.
+
+  2. WHICH TRANSITIONS ARE LEGAL
+     Chosen: exactly three. Consequence: reassigning a resolved ticket is
+     refused, since the brief says a resolved ticket is only modified after a
+     reopen. Alternative: allow assignment on resolved tickets.
+
+  3. WHETHER 12.0 IS A VALID affected_users
+     Chosen: reject it. Alternative: accept as 12. Rejecting follows the
+     brief's "not a decimal" literally and avoids a silent truncation.
+
+
+--------------------------------------------------------------------------------
+PART 12 - QUICK DEMO SCRIPT
+--------------------------------------------------------------------------------
+
+The brief specifies this demonstration route. Practise it until it is smooth.
+
+  1. rm -rf data          start from a clean slate
+  2. python3 main.py      start the program
+  3. Create a ticket: "Campus Wi-Fi is down", Network, HIGH, 15
+     -> show it came out CRITICAL, and explain the rule-1 match
+  4. Try to create one with 0 affected users
+     -> show the rejection, and that no ticket was added
+  5. Create two more with different urgency/users so the queue is interesting
+  6. Assign a ticket, then move it open -> in_progress -> resolved
+  7. Try resolved -> in_progress
+     -> show the rejection and explain the reopen requirement
+  8. Show the work queue, ordered critical -> high -> medium -> low
+  9. Show the report
+ 10. Exit (tickets save automatically)
+ 11. Start the program again
+     -> show the tickets came back, and that a new ticket gets the NEXT id,
+        not T001
+ 12. Run python3 -m unittest discover -s tests -v
+ 13. Show the two PRs on GitHub, with the review comments
+
+
+--------------------------------------------------------------------------------
+PART 13 - WHAT TO SAY WHEN ASKED
+--------------------------------------------------------------------------------
+
+"Why is priority first-match-wins?"
+  Because one ticket can satisfy several rules at once - high urgency with 12
+  users satisfies rules 1, 2 and 3. The cascade goes most severe first and
+  returns early, so the most severe matching rule wins deterministically.
+  Reordering the branches would change results without changing any single
+  rule.
+
+"Why isn't this an AI model?"
+  The brief specifies exact rules, and exact rules should be code. AI is used
+  to learn, to review, and to question the design - it is not in the runtime
+  path. A deterministic rule set is also testable, which the priority engine
+  is.
+
+"Why does a corrupt file stop the program?"
+  Because starting with an empty list means the next save overwrites the
+  user's real data with nothing. Refusing to start loses no data and tells the
+  user exactly what to fix. The file is never modified on the failure path.
+
+"Why is there no input() outside main.py?"
+  So the logic can be tested directly. A test calls create_ticket with bad
+  data and asserts on the exception - no stdin, no mocking.
+
+"Why check that the state is unchanged after an expected exception?"
+  Because a function can raise AFTER it has already mutated the record. The
+  exception alone does not prove the data survived; the second assertion does.
+
+"Why does the next id come from scanning the tickets?"
+  So ids stay unique after a reload. A counter in memory would restart at 1
+  and collide with tickets already in the file.
+
+"Why sort the id as a number?"
+  Because as text "T10" sorts before "T9". We parse the integer so the
+  tie-break is genuinely numeric, as the brief requires.
+
+
+================================================================================
+END
+================================================================================
