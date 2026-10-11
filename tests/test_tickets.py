@@ -27,7 +27,7 @@ class PriorityEngineTests(unittest.TestCase):
         self.assertEqual(tickets.calculate_priority("high", 2), "high")
 
     def test_low_urgency_with_ten_users_is_high(self):
-        # Rule 2 via user count alone. Guards against a copy-paste error that
+        # Rule 2 via user count alone. Guards against any copy-paste error that
         # would make rule 2 test urgency again instead of users.
         self.assertEqual(tickets.calculate_priority("low", 10), "high")
 
